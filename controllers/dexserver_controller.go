@@ -230,18 +230,36 @@ func isNotDefinedConfigmap(m *authv1alpha1.DexServer, r *DexServerReconciler, ct
 	return false
 }
 
-func getClientSecretFromRef(m *authv1alpha1.DexServer, r *DexServerReconciler, ctx context.Context) string {
-	var secretNamespace string
-	secretName := m.Spec.Connectors[0].Config.ClientSecretRef.Name
-	if secretNamespace = m.Spec.Connectors[0].Config.ClientSecretRef.Namespace; secretNamespace == "" {
-		secretNamespace = m.Namespace
+func getSecretFromRef(connector authv1alpha1.ConnectorSpec, m *authv1alpha1.DexServer, r *DexServerReconciler, ctx context.Context) (string, error) {
+	// Get connector type
+	connectorType := connector.Type
+	var secretName, secretNamespace string
+
+	switch connectorType {
+	case authv1alpha1.ConnectorTypeGitHub:
+		secretName = connector.Config.GitHub.ClientSecretRef.Name
+		if secretNamespace = connector.Config.GitHub.ClientSecretRef.Namespace; secretNamespace == "" {
+			secretNamespace = m.Namespace
+		}
+		resource := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, resource); err != nil && errors.IsNotFound(err) {
+			// TODO(cdoan): handle errors
+			return "", fmt.Errorf("Client Secret could not be retrieved")
+		}
+		return string(resource.Data["clientSecret"]), nil
+	case authv1alpha1.ConnectorTypeLDAP:
+		secretName = connector.Config.LDAP.BindPWRef.Name
+		if secretNamespace = connector.Config.LDAP.BindPWRef.Namespace; secretNamespace == "" {
+			secretNamespace = m.Namespace
+		}
+		resource := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, resource); err != nil && errors.IsNotFound(err) {
+			return "", fmt.Errorf("Bind PW could not be retrieved")
+		}
+		return string(resource.Data["bindPW"]), nil
+	default:
+		return "", fmt.Errorf("Invalid connector type")
 	}
-	resource := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, resource); err != nil && errors.IsNotFound(err) {
-		// TODO(cdoan): handle errors
-		return ""
-	}
-	return string(resource.Data["clientSecret"])
 }
 
 // Define the secret for grpc Mutual TLS. This secret is volume mounted on the dex instance pod. The client cert should be loaded by the gRPC client code.
@@ -483,13 +501,27 @@ type DexGrpcSpec struct {
 	Reflection  bool   `yaml:"reflection,omitempty"`
 }
 
-// The DexConnectorConfigSpec is specific to the Github connector as of now 
+// The DexConnectorConfigSpec is specific to the Github connector as of now
 // TODO: Add config properties for ldap
 type DexConnectorConfigSpec struct {
+	// Github configuration
 	ClientID     string `yaml:"clientID,omitempty"`
 	ClientSecret string `yaml:"clientSecret,omitempty"`
 	RedirectURI  string `yaml:"redirectURI,omitempty"`
 	Org          string `yaml:"org,omitempty"`
+
+	// LDAP configuration
+	Host               string                       `json:"host,omitempty"`
+	InsecureNoSSL      bool                         `json:"insecureNoSSL,omitempty"`
+	InsecureSkipVerify bool                         `json:"insecureSkipVerify,omitempty"`
+	StartTLS           bool                         `json:"startTLS,omitempty"`
+	RootCA             string                       `json:"rootCA,omitempty"`
+	RootCAData         []byte                       `json:"rootCAData,omitempty"`
+	BindDN             string                       `json:"bindDN,omitempty"`
+	BindPW             string                       `json:"bindPW,omitempty"`
+	UsernamePrompt     string                       `json:"usernamePrompt,omitempty"`
+	UserSearch         authv1alpha1.UserSearchSpec  `json:"userSearch,omitempty"`
+	GroupSearch        authv1alpha1.GroupSearchSpec `json:"groupSearch,omitempty"`
 }
 
 type DexConnectorSpec struct {
@@ -528,7 +560,6 @@ func (r *DexServerReconciler) defineConfigMap(m *authv1alpha1.DexServer, ctx con
 	labels := map[string]string{
 		"app": m.Name,
 	}
-	clientSecret := getClientSecretFromRef(m, r, ctx)
 
 	// Define config yaml data for Dex
 	configYamlData := DexConfigYamlSpec{
@@ -557,6 +588,8 @@ func (r *DexServerReconciler) defineConfigMap(m *authv1alpha1.DexServer, ctx con
 		EnablePasswordDB: true,
 	}
 
+	var newConnector DexConnectorSpec
+
 	// Iterate over connectors defined in the DexServer to create the dex configuration for connectors
 	for _, connector := range m.Spec.Connectors {
 		// Determine the connector type
@@ -564,22 +597,79 @@ func (r *DexServerReconciler) defineConfigMap(m *authv1alpha1.DexServer, ctx con
 		switch connector.Type {
 		case authv1alpha1.ConnectorTypeGitHub:
 			connectorType = string(authv1alpha1.ConnectorTypeGitHub)
+
+			// Get GitHub client secret from ref
+			clientSecret, err := getSecretFromRef(connector, m, r, ctx)
+
+			if err != nil {
+				log.Info(err.Error())
+				return nil
+			}
+
+			newConnector = DexConnectorSpec{
+				Type: connectorType,
+				Id:   connector.Id,
+				Name: connector.Name,
+				Config: DexConnectorConfigSpec{
+					ClientID:     connector.Config.GitHub.ClientID,
+					ClientSecret: clientSecret,
+					RedirectURI:  connector.Config.GitHub.RedirectURI,
+					Org:          "kubernetes",
+				},
+			}
 		case authv1alpha1.ConnectorTypeLDAP:
 			connectorType = string(authv1alpha1.ConnectorTypeLDAP)
-		default:
-			connectorType = string(authv1alpha1.ConnectorTypeGitHub)
-		}
 
-		newConnector := DexConnectorSpec{
-			Type: connectorType,
-			Id:   connector.Id,
-			Name: connector.Name,
-			Config: DexConnectorConfigSpec{	// This definition is specific to the Github connector (the ldap configuration has different attributes for config)
-				ClientID:     connector.Config.ClientID,
-				ClientSecret: clientSecret,
-				RedirectURI:  connector.Config.RedirectURI,
-				Org:          "kubernetes",
-			},
+			// Get bindPW from secret ref
+			bindPW, err := getSecretFromRef(connector, m, r, ctx)
+
+			if err != nil {
+				log.Info(err.Error())
+				return nil
+			}
+
+			newConnector = DexConnectorSpec{
+				Type: connectorType,
+				Id:   connector.Id,
+				Name: connector.Name,
+				Config: DexConnectorConfigSpec{
+					Host:               connector.Config.LDAP.Host,
+					InsecureNoSSL:      connector.Config.LDAP.InsecureNoSSL,
+					InsecureSkipVerify: connector.Config.LDAP.InsecureSkipVerify,
+					StartTLS:           connector.Config.LDAP.StartTLS,
+					RootCA:             connector.Config.LDAP.RootCA,
+					RootCAData:         connector.Config.LDAP.RootCAData,
+					BindDN:             connector.Config.LDAP.BindDN,
+					BindPW:             bindPW,
+					UsernamePrompt:     connector.Config.LDAP.UsernamePrompt,
+				},
+			}
+
+			if connector.Config.LDAP.UserSearch.BaseDN != "" {
+				newConnector.Config.UserSearch = authv1alpha1.UserSearchSpec{
+					BaseDN:                    connector.Config.LDAP.UserSearch.BaseDN,
+					Filter:                    connector.Config.LDAP.UserSearch.Filter,
+					Username:                  connector.Config.LDAP.UserSearch.Username,
+					Scope:                     connector.Config.LDAP.UserSearch.Scope,
+					IDAttr:                    connector.Config.LDAP.UserSearch.IDAttr,
+					EmailAttr:                 connector.Config.LDAP.UserSearch.EmailAttr,
+					NameAttr:                  connector.Config.LDAP.UserSearch.NameAttr,
+					PreferredUsernameAttrAttr: connector.Config.LDAP.UserSearch.PreferredUsernameAttrAttr,
+					EmailSuffix:               connector.Config.LDAP.UserSearch.EmailSuffix,
+				}
+			}
+
+			if connector.Config.LDAP.GroupSearch.BaseDN != "" {
+				newConnector.Config.GroupSearch = authv1alpha1.GroupSearchSpec{
+					BaseDN:       connector.Config.LDAP.GroupSearch.BaseDN,
+					Filter:       connector.Config.LDAP.GroupSearch.Filter,
+					Scope:        connector.Config.LDAP.GroupSearch.Scope,
+					UserAttr:     connector.Config.LDAP.GroupSearch.UserAttr,
+					GroupAttr:    connector.Config.LDAP.GroupSearch.GroupAttr,
+					UserMatchers: connector.Config.LDAP.GroupSearch.UserMatchers,
+					NameAttr:     connector.Config.LDAP.GroupSearch.NameAttr,
+				}
+			}
 		}
 		configYamlData.Connectors = append(configYamlData.Connectors, newConnector)
 	}

@@ -58,14 +58,15 @@ spec:
     alwasyShowLoginScreen: false
     passwordConnector: "local"
   connectors:
-  - type: github
-    id: github
+  - id: github
+    type: github
     name: github
-    config:
+    github:
+      type: github
       clientID: "${GITHUB_APP_CLIENTID}"
       clientSecretRef:
         name: ${NAME}-client-secret
-      redirectURI: "https://${NAME}-${NS}.${APPS}/callback"
+      redirectURI: "https://${NAME}-${NS}.${APPS}/callback"      
 EOF
 
 cat > demo-dexclient-hub.yaml <<EOF
