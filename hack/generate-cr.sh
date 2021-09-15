@@ -61,7 +61,7 @@ spec:
   - type: github
     id: github
     name: github
-    config:
+    github:
       clientID: "${GITHUB_APP_CLIENTID}"
       clientSecretRef:
         name: ${NAME}-client-secret
