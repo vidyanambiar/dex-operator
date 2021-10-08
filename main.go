@@ -47,6 +47,8 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+const IDPCredentialLabel = "auth.identitatem.io/idp-credential"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -73,9 +75,17 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme:             scheme,
+		MetricsBindAddress: metricsAddr,
+		Port:               9443,
+		// NewCache: cache.BuilderWithOptions(cache.Options{
+		// 	SelectorsByObject: cache.SelectorsByObject{
+		// 		&corev1.Secret{}: {
+		// 			Label: labels.SelectorFromSet(labels.Set{IDPCredentialLabel: "", "app": ""}),
+		// 		},
+		// 	},
+		// },
+		// ),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "09c5986b.identitatem.io",
